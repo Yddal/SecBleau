@@ -27,6 +27,9 @@
   // All loaded areas — used for viewport intersection without querySourceFeatures
   let loadedAreas: AreaFeatureCollection | null = null;
 
+  // Cluster bounding boxes — used to detect orphan areas not covered by any cluster
+  let loadedClusterBboxes: { swLon: number; swLat: number; neLon: number; neLat: number }[] = [];
+
   // Boulder cache: area_id → GeoJSON collection (capped at MAX_CACHE_AREAS to prevent memory growth)
   const MAX_CACHE_AREAS = 25;
   const boulderCache = new Map<number, BoulderFeatureCollection>();
@@ -173,6 +176,7 @@
       id: 'area-fill',
       type: 'fill',
       source: 'area-polys',
+      layout: { visibility: 'none' },
       paint: {
         'fill-color': ['get', '_color'],
         'fill-opacity': 0.22,
@@ -183,6 +187,7 @@
       id: 'area-outline',
       type: 'line',
       source: 'area-polys',
+      layout: { visibility: 'none' },
       paint: {
         'line-color': ['get', '_color'],
         'line-width': 2,
@@ -249,43 +254,58 @@
         })),
       });
 
-      // Polygon features for fill/outline — use hull blob if available, fall back to bbox
+      // Polygon features for fill/outline.
+      // clusters.geojson has two feature layouts:
+      //   - Features 0–5:  Point geometry + bbox properties (label/metadata only)
+      //   - Features 6–24: Polygon geometry (the actual hull) + no bbox
+      // Only add polygon-geometry features to cluster-polys; Point features are for labels only.
       const polyFeatures = data.features
+        .filter((f) => f.geometry && f.geometry.type !== 'Point')
         .map((f) => {
           const p = f.properties;
-          const swLon = parseFloat(String(p.southWestLon));
-          const swLat = parseFloat(String(p.southWestLat));
-          const neLon = parseFloat(String(p.northEastLon));
-          const neLat = parseFloat(String(p.northEastLat));
-          if (isNaN(swLon) || isNaN(swLat) || isNaN(neLon) || isNaN(neLat)) return null;
-          const sharedProps = { _color: scoreToColor(p.dryness_score), name: p.name, sw_lon: swLon, sw_lat: swLat, ne_lon: neLon, ne_lat: neLat };
-
-          const hull = p.hull as { type: string; coordinates: unknown } | null | undefined;
-          if (hull && hull.coordinates) {
-            return { type: 'Feature' as const, geometry: hull as any, properties: sharedProps };
-          }
-
           return {
             type: 'Feature' as const,
-            geometry: {
-              type: 'Polygon' as const,
-              coordinates: [[
-                [swLon, swLat],
-                [neLon, swLat],
-                [neLon, neLat],
-                [swLon, neLat],
-                [swLon, swLat],
-              ]],
-            },
-            properties: sharedProps,
+            geometry: f.geometry as any,
+            properties: { _color: scoreToColor(p.dryness_score), name: p.name },
           };
-        })
-        .filter(Boolean);
+        });
 
       (map.getSource('cluster-polys') as maplibregl.GeoJSONSource).setData({
         type: 'FeatureCollection',
         features: polyFeatures as any,
       });
+
+      // Store bboxes for orphan area detection in loadAreas().
+      // For Point features use the explicit bbox properties.
+      // For Polygon features (clusters 6-24) derive the bbox from the ring coordinates.
+      loadedClusterBboxes = data.features
+        .map((f) => {
+          const p = f.properties;
+
+          if (f.geometry && f.geometry.type !== 'Point') {
+            // Derive bbox from polygon ring
+            const ring = (f.geometry as any).coordinates[0] as [number, number][];
+            if (!ring || ring.length === 0) return null;
+            const lons = ring.map((c) => c[0]);
+            const lats = ring.map((c) => c[1]);
+            return {
+              swLon: Math.min(...lons),
+              swLat: Math.min(...lats),
+              neLon: Math.max(...lons),
+              neLat: Math.max(...lats),
+            };
+          }
+
+          return {
+            swLon: parseFloat(String(p.southWestLon)),
+            swLat: parseFloat(String(p.southWestLat)),
+            neLon: parseFloat(String(p.northEastLon)),
+            neLat: parseFloat(String(p.northEastLat)),
+          };
+        })
+        .filter((b): b is NonNullable<typeof b> =>
+          b !== null && !isNaN(b.swLon) && !isNaN(b.swLat) && !isNaN(b.neLon) && !isNaN(b.neLat)
+        );
 
     } catch (e) {
       console.warn('Could not load clusters:', e);
@@ -314,7 +334,16 @@
         .map((f) => {
           const p = f.properties;
           const color = scoreToColor(p.dryness_score);
-          const props = { id: p.id, name: p.name, _color: color };
+
+          // An orphan area is one whose centre point falls outside every cluster bbox.
+          // Orphan areas are shown even at the zoomed-out cluster view.
+          const [lon, lat] = f.geometry.coordinates as [number, number];
+          const isOrphan = loadedClusterBboxes.length === 0 || !loadedClusterBboxes.some(
+            (b) => lon >= b.swLon && lon <= b.neLon && lat >= b.swLat && lat <= b.neLat,
+          );
+
+          // Store as integer (0/1) — MapLibre boolean filter expressions are unreliable with JS booleans
+          const props = { id: p.id, name: p.name, _color: color, _orphan: isOrphan ? 1 : 0 };
 
           // Prefer the hull polygon computed from actual boulder positions
           if (p.hull && (p.hull as any).coordinates) {
@@ -380,7 +409,10 @@
     // Click on area bbox polygon
     map.on('click', 'area-fill', (e) => {
       if (!e.features?.length) return;
-      const props = e.features[0].properties;
+      const polyProps = e.features[0].properties;
+      // Polygon features only store id/name/_color — look up full props from loadedAreas
+      const fullFeature = loadedAreas?.features.find((f) => f.properties.id === polyProps.id);
+      const props = fullFeature ? fullFeature.properties : polyProps;
       dispatch('areaClick', {
         id: props.id,
         name: props.name,
@@ -409,7 +441,7 @@
   function applyZoomVisibility(zoom: number) {
     if (!map.isStyleLoaded()) return;
     const showClusters = zoom < CLUSTER_MAX_ZOOM;
-    const showAreas = zoom >= CLUSTER_MAX_ZOOM;   // areas shown at both area zoom AND boulder zoom
+    const showAreas    = zoom >= CLUSTER_MAX_ZOOM;
     const showBoulders = zoom >= BOULDER_MIN_ZOOM;
 
     const set = (layer: string, vis: boolean) => {
@@ -417,18 +449,36 @@
         map.setLayoutProperty(layer, 'visibility', vis ? 'visible' : 'none');
       }
     };
+    const setFilter = (layer: string, filter: unknown) => {
+      if (map.getLayer(layer)) map.setFilter(layer, filter as any);
+    };
 
-    set('cluster-fill', showClusters);
+    set('cluster-fill',    showClusters);
     set('cluster-outline', showClusters);
-    // Cluster names: visible at cluster + area zoom, hidden at boulder zoom (too cluttered)
-    set('cluster-labels', showClusters || (showAreas && !showBoulders));
+    set('cluster-labels',  showClusters || (showAreas && !showBoulders));
 
-    // Area polygons: only between cluster zoom and boulder zoom
-    const showAreaPolys = showAreas && !showBoulders;
-    set('area-fill', showAreaPolys);
-    set('area-outline', showAreaPolys);
-    // Area names: visible at area zoom and boulder zoom
-    set('area-labels', showAreas);
+    if (showClusters) {
+      // At cluster zoom: show only orphan areas (those not covered by any cluster polygon)
+      setFilter('area-fill',    ['==', ['get', '_orphan'], 1]);
+      setFilter('area-outline', ['==', ['get', '_orphan'], 1]);
+      set('area-fill',    true);
+      set('area-outline', true);
+      set('area-labels',  false);
+    } else if (showAreas && !showBoulders) {
+      // At area zoom: show all area polygons, no filter
+      setFilter('area-fill',    null);
+      setFilter('area-outline', null);
+      set('area-fill',    true);
+      set('area-outline', true);
+      set('area-labels',  true);
+    } else {
+      // At boulder zoom: hide area polygons (too cluttered), keep labels
+      setFilter('area-fill',    null);
+      setFilter('area-outline', null);
+      set('area-fill',    false);
+      set('area-outline', false);
+      set('area-labels',  true);
+    }
 
     set('boulder-circles', showBoulders);
   }

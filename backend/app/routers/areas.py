@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json as json_mod
 import logging
+from collections import defaultdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
@@ -159,60 +160,210 @@ async def get_clusters(db: AsyncSession = Depends(get_db)):
     enriched = []
     for feat in data.get("features", []):
         props = feat.get("properties", {})
-        sw_lat = float(props.get("southWestLat", 0))
-        sw_lon = float(props.get("southWestLon", 0))
-        ne_lat = float(props.get("northEastLat", 0))
-        ne_lon = float(props.get("northEastLon", 0))
+        geom = feat.get("geometry", {})
+        has_bbox = all(props.get(k) is not None for k in ("southWestLat", "southWestLon", "northEastLat", "northEastLon"))
+        has_polygon = geom.get("type") in ("Polygon", "MultiPolygon")
 
-        area_result = await db.execute(
-            select(Area.id, DrynessScore.score)
-            .outerjoin(DrynessScore, and_(
-                DrynessScore.area_id == Area.id,
-                DrynessScore.boulder_id == None,
-            ))
-            .where(
-                Area.lat >= sw_lat,
-                Area.lat <= ne_lat,
-                Area.lon >= sw_lon,
-                Area.lon <= ne_lon,
+        if has_bbox:
+            sw_lat = float(props["southWestLat"])
+            sw_lon = float(props["southWestLon"])
+            ne_lat = float(props["northEastLat"])
+            ne_lon = float(props["northEastLon"])
+
+            area_result = await db.execute(
+                select(Area.id, DrynessScore.score)
+                .outerjoin(DrynessScore, and_(
+                    DrynessScore.area_id == Area.id,
+                    DrynessScore.boulder_id == None,
+                ))
+                .where(
+                    Area.lat >= sw_lat,
+                    Area.lat <= ne_lat,
+                    Area.lon >= sw_lon,
+                    Area.lon <= ne_lon,
+                )
+                .order_by(DrynessScore.computed_at.desc())
             )
-            .order_by(DrynessScore.computed_at.desc())
-        )
-        rows = area_result.all()
-        scores = [r.score for r in rows if r.score is not None]
-        avg_score = sum(scores) / len(scores) if scores else None
+            rows = area_result.all()
 
-        # Compute convex-hull blob from area centre points using PostGIS
-        hull_result = await db.execute(
-            text("""
-                SELECT ST_AsGeoJSON(
-                    ST_Buffer(
-                        ST_ConvexHull(ST_Collect(ST_MakePoint(lon, lat))),
-                        0.004,
-                        'quad_segs=6'
-                    )
-                ) AS hull
-                FROM areas
-                WHERE lat >= :sw_lat AND lat <= :ne_lat
-                  AND lon >= :sw_lon AND lon <= :ne_lon
-            """),
-            {"sw_lat": sw_lat, "ne_lat": ne_lat, "sw_lon": sw_lon, "ne_lon": ne_lon},
-        )
-        hull_row = hull_result.fetchone()
-        import json as _json
-        hull_geom = _json.loads(hull_row.hull) if hull_row and hull_row.hull else None
+            hull_result = await db.execute(
+                text("""
+                    SELECT ST_AsGeoJSON(
+                        ST_Buffer(
+                            ST_ConvexHull(ST_Collect(ST_MakePoint(lon, lat))),
+                            0.004,
+                            'quad_segs=6'
+                        )
+                    ) AS hull
+                    FROM areas
+                    WHERE lat >= :sw_lat AND lat <= :ne_lat
+                      AND lon >= :sw_lon AND lon <= :ne_lon
+                """),
+                {"sw_lat": sw_lat, "ne_lat": ne_lat, "sw_lon": sw_lon, "ne_lon": ne_lon},
+            )
+            hull_row = hull_result.fetchone()
+            hull_geom = json_mod.loads(hull_row.hull) if hull_row and hull_row.hull else None
+
+        elif has_polygon:
+            # Use ST_Contains with the existing polygon geometry to find contained areas
+            geom_json = json_mod.dumps(geom)
+            area_result = await db.execute(text("""
+                SELECT a.id, ds.score
+                FROM areas a
+                LEFT JOIN LATERAL (
+                    SELECT score FROM dryness_scores
+                    WHERE area_id = a.id AND boulder_id IS NULL
+                    ORDER BY computed_at DESC LIMIT 1
+                ) ds ON true
+                WHERE ST_Contains(
+                    ST_GeomFromGeoJSON(:geom),
+                    ST_SetSRID(ST_MakePoint(a.lon, a.lat), 4326)
+                )
+            """), {"geom": geom_json})
+            rows = area_result.all()
+            hull_geom = None  # polygon geometry already in the feature
+
+        else:
+            rows = []
+            hull_geom = None
+
+        scores = [r.score for r in rows if r.score is not None]
+        best_score = max(scores) if scores else None
 
         enriched.append({
             **feat,
             "properties": {
                 **props,
-                "dryness_score": avg_score,
+                "dryness_score": best_score,
                 "area_count": len(rows),
                 "hull": hull_geom,
             }
         })
 
     return {"type": "FeatureCollection", "features": enriched}
+
+
+@router.get("/analysis")
+async def get_areas_analysis(db: AsyncSession = Depends(get_db)):
+    """
+    Per-area analysis data for the Analysis page.
+    Returns all areas grouped by cluster with dryness breakdown,
+    physical characteristics, and report counts for 4h / 12h / 24h windows.
+    """
+    if not CLUSTERS_CACHE_PATH.exists():
+        return JSONResponse(content={"generated_at": datetime.now(timezone.utc).isoformat(), "clusters": []})
+
+    cluster_data = json_mod.loads(CLUSTERS_CACHE_PATH.read_text(encoding="utf-8"))
+
+    result = await db.execute(select(Area))
+    all_areas = result.scalars().all()
+    if not all_areas:
+        return JSONResponse(content={"generated_at": datetime.now(timezone.utc).isoformat(), "clusters": []})
+
+    area_ids = [a.id for a in all_areas]
+    now = datetime.now(timezone.utc)
+    cutoff_4h  = now - timedelta(hours=4)
+    cutoff_12h = now - timedelta(hours=12)
+    cutoff_24h = now - timedelta(hours=24)
+
+    # Batch: latest dryness score per area (including breakdown fields)
+    scores_result = await db.execute(text("""
+        SELECT DISTINCT ON (area_id)
+            area_id, score, physics_score, ml_correction, confidence, is_estimated,
+            hours_since_rain, last_rain_at, last_rain_mm
+        FROM dryness_scores
+        WHERE boulder_id IS NULL
+          AND area_id = ANY(:ids)
+        ORDER BY area_id, computed_at DESC
+    """), {"ids": area_ids})
+    scores_by_area = {row.area_id: row for row in scores_result}
+
+    # Batch: report counts per area across 4h / 12h / 24h windows
+    counts_result = await db.execute(text("""
+        SELECT
+            area_id,
+            COUNT(*) FILTER (WHERE reported_at >= :cut4h)  AS count_4h,
+            COUNT(*) FILTER (WHERE reported_at >= :cut12h) AS count_12h,
+            COUNT(*) FILTER (WHERE reported_at >= :cut24h) AS count_24h
+        FROM user_reports
+        WHERE area_id = ANY(:ids)
+          AND is_valid = true
+        GROUP BY area_id
+    """), {"ids": area_ids, "cut4h": cutoff_4h, "cut12h": cutoff_12h, "cut24h": cutoff_24h})
+    report_counts = {row.area_id: row for row in counts_result}
+
+    # Batch: hourly weather per area for the last 72 h (used for charts)
+    cutoff_72h = now - timedelta(hours=72)
+    weather_hourly_result = await db.execute(text("""
+        SELECT
+            area_id,
+            date_trunc('hour', recorded_at)         AS hour,
+            AVG(temperature_c)::float               AS temp,
+            AVG(humidity_pct)::float                AS humidity,
+            AVG(wind_speed_ms)::float               AS wind,
+            SUM(precipitation_mm)::float            AS precip
+        FROM weather_readings
+        WHERE area_id = ANY(:ids)
+          AND recorded_at >= :cutoff
+          AND recorded_at <= :now
+        GROUP BY area_id, date_trunc('hour', recorded_at)
+        ORDER BY area_id, hour ASC
+    """), {"ids": area_ids, "cutoff": cutoff_72h, "now": now})
+    weather_hourly: dict[int, list] = defaultdict(list)
+    for row in weather_hourly_result:
+        weather_hourly[row.area_id].append({
+            "h":  row.hour.isoformat(),
+            "t":  round(row.temp,     1) if row.temp     is not None else None,
+            "hu": round(row.humidity, 1) if row.humidity is not None else None,
+            "w":  round(row.wind,     2) if row.wind     is not None else None,
+            "p":  round(row.precip,   2) if row.precip   is not None else None,
+        })
+
+    # Group areas into clusters using bounding boxes from clusters.geojson
+    clusters_out = []
+    for feat in cluster_data.get("features", []):
+        props = feat.get("properties", {})
+        sw_lat = float(props.get("southWestLat", 0))
+        sw_lon = float(props.get("southWestLon", 0))
+        ne_lat = float(props.get("northEastLat", 0))
+        ne_lon = float(props.get("northEastLon", 0))
+        cluster_name = props.get("name", "")
+
+        cluster_areas = []
+        for area in all_areas:
+            if sw_lat <= area.lat <= ne_lat and sw_lon <= area.lon <= ne_lon:
+                s  = scores_by_area.get(area.id)
+                rc = report_counts.get(area.id)
+                cluster_areas.append({
+                    "id":            area.id,
+                    "name":          area.name,
+                    "aspect":        area.aspect,
+                    "shade_factor":  area.shade_factor,
+                    "canopy_factor": area.canopy_factor,
+                    "elevation_m":   area.elevation_m,
+                    "dryness_score": s.score          if s else None,
+                    "physics_score": s.physics_score  if s else None,
+                    "ml_correction": s.ml_correction  if s else None,
+                    "confidence":    s.confidence     if s else 0.0,
+                    "is_estimated":  s.is_estimated   if s else True,
+                    "hours_since_rain": s.hours_since_rain if s else None,
+                    "last_rain_mm":     s.last_rain_mm     if s else None,
+                    "report_count_4h":  int(rc.count_4h)  if rc else 0,
+                    "report_count_12h": int(rc.count_12h) if rc else 0,
+                    "report_count_24h": int(rc.count_24h) if rc else 0,
+                    "weather_72h":      weather_hourly.get(area.id, []),
+                })
+
+        if cluster_areas:
+            clusters_out.append({
+                "name":  cluster_name,
+                "areas": sorted(cluster_areas, key=lambda x: x["name"]),
+            })
+
+    return JSONResponse(
+        content={"generated_at": now.isoformat(), "clusters": clusters_out},
+        headers={"Cache-Control": "public, max-age=60, stale-while-revalidate=300"},
+    )
 
 
 @router.get("/{area_id}", response_model=AreaDetail)

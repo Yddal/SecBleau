@@ -16,7 +16,7 @@ from .database import engine, Base
 # Import models so SQLAlchemy registers them before create_all
 from .models import Area, Boulder, WeatherReading, DrynessScore, UserReport, ModelParam  # noqa: F401
 
-from .routers import areas, boulders, weather
+from .routers import areas, boulders, weather, reports
 from .tasks.scheduler import create_scheduler
 from .tasks.fetch_weather import fetch_weather_for_all_areas
 from .tasks.update_scores import recompute_all_dryness_scores
@@ -84,6 +84,7 @@ def create_app() -> FastAPI:
     app.include_router(areas.router, prefix="/api/v1")
     app.include_router(boulders.router, prefix="/api/v1")
     app.include_router(weather.router, prefix="/api/v1")
+    app.include_router(reports.router, prefix="/api/v1")
 
     @app.get("/api/health")
     async def health():

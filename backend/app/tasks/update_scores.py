@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.area import Area
@@ -45,6 +45,11 @@ async def recompute_all_dryness_scores(db: AsyncSession) -> None:
     areas_result = await db.execute(select(Area))
     areas = areas_result.scalars().all()
 
+    # Prune old DrynessScore rows to prevent unbounded table growth.
+    # Keep one extra day beyond the weather history window as a safety margin.
+    retention_cutoff = now - timedelta(days=settings.weather_history_days + 1)
+    await db.execute(delete(DrynessScore).where(DrynessScore.computed_at < retention_cutoff))
+
     for area in areas:
         # Load weather history for this area
         weather_result = await db.execute(
@@ -61,20 +66,7 @@ async def recompute_all_dryness_scores(db: AsyncSession) -> None:
         if not weather_rows:
             continue
 
-        # Load forecast weather (future readings from the last fetch)
-        forecast_result = await db.execute(
-            select(WeatherReading)
-            .where(
-                WeatherReading.area_id == area.id,
-                WeatherReading.recorded_at > now,
-            )
-            .order_by(WeatherReading.recorded_at.asc())
-            .limit(48)
-        )
-        forecast_rows = forecast_result.scalars().all()
-
         history_snaps = _rows_to_snapshots(weather_rows)
-        forecast_snaps = _rows_to_snapshots(forecast_rows)
 
         # Get area-level learned params
         area_offset_param = await get_or_create_param(db, "area", area.id, "area_drying_offset")

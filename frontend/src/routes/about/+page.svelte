@@ -10,6 +10,9 @@
     <div class="tagline">About</div>
     <a class="nav-link" href="/">← Map</a>
     <a class="nav-link" href="/conditions">Conditions</a>
+    <a class="nav-link" href="/analysis">Analysis</a>
+    <div class="spacer"></div>
+    <a class="nav-link" href="/privacy">Privacy</a>
   </header>
 
   <main class="content">
@@ -142,6 +145,7 @@
   .tagline { font-size: 13px; color: #9ca3af; flex: 1; }
   .nav-link { color: #9ca3af; font-size: 12px; text-decoration: none; }
   .nav-link:hover { color: #fff; }
+  .spacer { flex: 1; }
 
   .content {
     max-width: 720px;

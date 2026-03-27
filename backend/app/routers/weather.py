@@ -83,24 +83,26 @@ async def get_conditions(db: AsyncSession = Depends(get_db)):
         )
         hourly_rows = hourly_result.all()
 
-        # Rain totals from weather readings (consistent source)
+        # Rain totals — past observations only (exclude forecast rows > now)
         rain_72h = round(sum(
             float(r.avg_mm or 0) for r in hourly_rows
-            if _make_tz_aware(r.hour) >= cutoff_72h
+            if cutoff_72h <= _make_tz_aware(r.hour) <= now
         ), 2)
         rain_48h = round(sum(
             float(r.avg_mm or 0) for r in hourly_rows
-            if _make_tz_aware(r.hour) >= cutoff_48h
+            if cutoff_48h <= _make_tz_aware(r.hour) <= now
         ), 2)
         rain_24h = round(sum(
             float(r.avg_mm or 0) for r in hourly_rows
-            if _make_tz_aware(r.hour) >= cutoff_24h
+            if cutoff_24h <= _make_tz_aware(r.hour) <= now
         ), 2)
 
-        # hours_since_rain — most recent hour with avg precipitation >= threshold
+        # hours_since_rain — most recent *past* hour with avg precipitation >= threshold
         last_rain_hour = None
         last_rain_mm_val = None
         for row in reversed(list(hourly_rows)):
+            if _make_tz_aware(row.hour) > now:
+                continue  # skip forecast rows
             if float(row.avg_mm or 0) >= RAIN_THRESHOLD:
                 last_rain_hour = _make_tz_aware(row.hour)
                 last_rain_mm_val = round(float(row.avg_mm), 2)

@@ -88,6 +88,8 @@
     </div>
     <SearchBar on:select={handleSearchSelect} />
     <a class="about-link" href="/conditions">Conditions</a>
+    <a class="about-link" href="/analysis">Analysis</a>
+    <div class="spacer"></div>
     <a class="about-link" href="/about">About</a>
     <a class="about-link" href="/privacy">Privacy</a>
   </header>
@@ -189,6 +191,7 @@
   .logo-bleau { color: #ffffff; }
   .about-link { color: #9ca3af; font-size: 12px; text-decoration: none; white-space: nowrap; }
   .about-link:hover { color: #fff; }
+  .spacer { flex: 1; }
 
   .map-wrap {
     position: relative;

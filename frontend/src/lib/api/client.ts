@@ -188,6 +188,61 @@ async function post<T>(path: string, body: unknown): Promise<T> {
   }
 }
 
+export interface WeatherHour {
+  h: string;          // ISO hour timestamp
+  t: number | null;   // temperature_c
+  hu: number | null;  // humidity_pct
+  w: number | null;   // wind_speed_ms
+  p: number | null;   // precipitation_mm (hourly sum)
+}
+
+export interface AreaAnalysis {
+  id: number;
+  name: string;
+  aspect: string | null;
+  shade_factor: number | null;
+  canopy_factor: number | null;
+  elevation_m: number | null;
+  dryness_score: number | null;
+  physics_score: number | null;
+  ml_correction: number | null;
+  confidence: number;
+  is_estimated: boolean;
+  hours_since_rain: number | null;
+  last_rain_mm: number | null;
+  report_count_4h: number;
+  report_count_12h: number;
+  report_count_24h: number;
+  weather_72h: WeatherHour[];
+}
+
+export interface ClusterAnalysis {
+  name: string;
+  areas: AreaAnalysis[];
+}
+
+export interface AnalysisResponse {
+  generated_at: string;
+  clusters: ClusterAnalysis[];
+}
+
+export interface RecentReport {
+  id: number;
+  report_level: string;
+  condition: string;
+  reported_at: string;
+  notes: string | null;
+  area_id: number;
+  area_name: string;
+  boulder_id: number | null;
+  boulder_name: string | null;
+}
+
+export interface RecentReportsResponse {
+  generated_at: string;
+  reports: RecentReport[];
+}
+
 export const api = {
   getAreas: () => get<AreaFeatureCollection>('/areas'),
   getAreaBoulders: (areaId: number) => get<BoulderFeatureCollection>(`/areas/${areaId}/boulders`),
@@ -203,4 +258,8 @@ export const api = {
 
   reportBoulder: (boulderId: number, condition: string, notes?: string) =>
     post<ReportOut>(`/boulders/${boulderId}/reports`, { condition, notes }),
+
+  getAnalysis: () => get<AnalysisResponse>('/areas/analysis'),
+  getRecentReports: (hours = 48, limit = 100) =>
+    get<RecentReportsResponse>(`/reports/recent?hours=${hours}&limit=${limit}`),
 };

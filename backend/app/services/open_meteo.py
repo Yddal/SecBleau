@@ -46,7 +46,7 @@ async def fetch_weather(
         "hourly": ",".join(HOURLY_VARS),
         "past_days": past_days,
         "forecast_days": forecast_days,
-        "timezone": "Europe/Paris",
+        "timezone": "UTC",
         "wind_speed_unit": "ms",  # metres per second
     }
 

@@ -56,6 +56,13 @@ if errorlevel 1 (
     echo  Run start.bat again once the issue is resolved.
 )
 
+echo  Calibrating area drying parameters…
+docker compose exec -T api python data/calibrate_areas.py
+if errorlevel 1 (
+    echo.
+    echo  WARNING: Area calibration had errors. Scores will use default parameters.
+)
+
 echo.
 echo  ==============================
 echo   SecBleau is running!

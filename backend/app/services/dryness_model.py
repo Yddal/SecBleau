@@ -111,7 +111,7 @@ def compute_evap_rate(
     k_vpd = (vpd / 25.0) * 0.08
 
     # Wind contribution — convective drying
-    # Wind of 5 m/s adds ~0.04/hr; above 10 m/s diminishing returns
+    # Wind of 5 m/s adds ~0.018/hr; above 10 m/s diminishing returns
     k_wind = 0.025 * (1 - math.exp(-wind / 4.0))
 
     # Solar radiation — direct heating of rock surface accelerates evaporation
@@ -149,12 +149,19 @@ def simulate_moisture(
 
     history = sorted(weather_history, key=lambda w: w.recorded_at)
     M = initial_moisture
-    dt = 1.0  # 1 hour steps
 
     last_rain_at = None
     last_rain_mm = 0.0
 
-    for snap in history:
+    for i, snap in enumerate(history):
+        # Compute actual time delta to handle gaps from API outages gracefully.
+        # Default to 1h for the first step or if delta is unreasonably large.
+        if i > 0:
+            raw_dt = (snap.recorded_at - history[i - 1].recorded_at).total_seconds() / 3600.0
+            dt = raw_dt if 0 < raw_dt <= 6 else 1.0
+        else:
+            dt = 1.0
+
         # Precipitation increases moisture (sandstone absorption)
         rain = max(0.0, snap.precipitation_mm)
         raining = rain > 0.1  # ignore dew/trace
@@ -168,7 +175,8 @@ def simulate_moisture(
         # (surface is being re-wetted; air is saturated, net flux is zero)
         if not raining:
             k = compute_evap_rate(snap, chars)
-            M = M - k * M * dt
+            # Exact solution of dM/dt = -k*M: M(t+dt) = M(t) * exp(-k*dt)
+            M = M * math.exp(-k * dt)
             M = max(0.0, min(1.0, M))
 
     # Hours since last significant rain
@@ -251,15 +259,21 @@ def hours_to_climbable(
     if current_score >= threshold:
         return None  # already climbable
 
+    forecast = sorted(forecast_weather, key=lambda w: w.recorded_at)
     M = current_moisture
-    for i, snap in enumerate(sorted(forecast_weather, key=lambda w: w.recorded_at)):
+    for i, snap in enumerate(forecast):
+        dt = 1.0
+        if i > 0:
+            raw_dt = (snap.recorded_at - forecast[i - 1].recorded_at).total_seconds() / 3600.0
+            dt = raw_dt if 0 < raw_dt <= 6 else 1.0
+
         rain = max(0.0, snap.precipitation_mm)
         raining = rain > 0.1
         if raining:
             M = min(1.0, M + rain * PRECIP_TO_MOISTURE)
         else:
             k = compute_evap_rate(snap, chars)
-            M = max(0.0, M - k * M)
+            M = max(0.0, M * math.exp(-k * dt))
 
         score = moisture_to_dryness_score(M, chars.area_drying_offset)
         if score >= threshold:

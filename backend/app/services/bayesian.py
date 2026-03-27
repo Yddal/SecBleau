@@ -40,6 +40,13 @@ AREA_OFFSET_PRIOR_VAR = 0.04          # narrower — offset is small correction
 # Higher = less weight per report, more stable but slower learning
 OBSERVATION_NOISE_VAR = 0.15 ** 2
 
+# During the first few observations (before outlier detection activates at n=5),
+# inflate observation noise to limit single-report impact.
+# Multiplier = 10 / (n+1): at n=0 → K≈53%, at n=4 → K≈85%, at n≥5 → K≈92% (outlier guard active).
+def _warmup_obs_noise(n_observations: int) -> float:
+    warmup = max(1.0, 10.0 / (n_observations + 1))
+    return OBSERVATION_NOISE_VAR * warmup
+
 # Outlier threshold — reports more than N std devs from rolling mean are rejected
 OUTLIER_SIGMA_THRESHOLD = 2.5
 
@@ -127,7 +134,8 @@ def _is_outlier(
         return False
 
     mean = sum(scores) / len(scores)
-    variance = sum((s - mean) ** 2 for s in scores) / len(scores)
+    # Bessel's correction (n-1) for unbiased sample variance
+    variance = sum((s - mean) ** 2 for s in scores) / (len(scores) - 1)
     std = math.sqrt(variance)
 
     if std < 0.05:  # too little variance to detect outliers meaningfully
@@ -172,15 +180,16 @@ async def update_boulder_params(
     # Scale residual to multiplier space (dampened: a 0.3 score gap → ~0.15 multiplier shift)
     target_multiplier = param.posterior_mean + residual * 0.5
 
-    # Kalman update
+    # Kalman update — inflate noise during warmup (first 5 obs) to limit troll impact
     new_mean, new_var = _kalman_update(
         param.posterior_mean,
         param.posterior_variance,
         target_multiplier,
-        OBSERVATION_NOISE_VAR,
+        _warmup_obs_noise(param.n_observations),
     )
 
     # Clamp to physically plausible range
+    old_mean = param.posterior_mean
     param.posterior_mean = max(0.3, min(3.0, new_mean))
     param.posterior_variance = new_var
     param.n_observations += 1
@@ -188,7 +197,7 @@ async def update_boulder_params(
     await db.flush()
     logger.debug(
         "Boulder %d multiplier updated: %.3f → %.3f (n=%d)",
-        boulder_id, param.posterior_mean, new_mean, param.n_observations,
+        boulder_id, old_mean, param.posterior_mean, param.n_observations,
     )
     return param.posterior_mean
 
@@ -223,7 +232,7 @@ async def update_area_params(
         param.posterior_mean,
         param.posterior_variance,
         target_offset,
-        OBSERVATION_NOISE_VAR,
+        _warmup_obs_noise(param.n_observations),
     )
 
     param.posterior_mean = max(-0.2, min(0.2, new_mean))
