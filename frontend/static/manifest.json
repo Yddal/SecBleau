@@ -1,0 +1,16 @@
+{
+  "name": "SecBleau",
+  "short_name": "SecBleau",
+  "description": "Is Fontainebleau dry? Bouldering conditions for every sector.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#111827",
+  "theme_color": "#1a9641",
+  "icons": [
+    {
+      "src": "/favicon.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+backend/.venv/
+*.egg-info/
+
+# Boolder data cache — downloaded automatically, don't commit large GeoJSON files
+backend/data/boolder-data/*.geojson
+backend/data/boolder-data/.version
+
+# Node
+frontend/node_modules/
+frontend/.svelte-kit/
+frontend/build/
+
+# Docker
+*.log
