@@ -1,0 +1,66 @@
+[
+  {
+    "name": "Beauvais",
+    "area_ids": [66, 62, 64, 65, 63]
+  },
+  {
+    "name": "Cuvier",
+    "area_ids": [49, 47, 50, 52, 51, 53, 54, 48, 55]
+  },
+  {
+    "name": "Apremont",
+    "area_ids": [40, 89, 39, 38, 45, 42, 44, 46, 41, 37, 43]
+  },
+  {
+    "name": "Franchard",
+    "area_ids": [34, 31, 32, 36, 30, 29, 33, 82, 35]
+  },
+  {
+    "name": "Trois Pignons Ouest",
+    "area_ids": [3, 17, 7, 23, 21, 22, 19, 24, 9, 20, 8, 6, 18, 2]
+  },
+  {
+    "name": "Trois Pignons Sud",
+    "area_ids": [12, 5, 13, 14, 15, 10, 16, 11]
+  },
+  {
+    "name": "Trois Pignons Est",
+    "area_ids": [4, 90, 25, 26, 81, 28, 27]
+  },
+  {
+    "name": "Rocher Canon",
+    "area_ids": [74, 75]
+  },
+  {
+    "name": "Mont Ussy / Calvaire",
+    "area_ids": [77, 80, 79, 78]
+  },
+  {
+    "name": "Larchant",
+    "area_ids": [56, 57, 58]
+  },
+  {
+    "name": "Buthiers",
+    "area_ids": [59, 60, 61]
+  },
+  {
+    "name": "Nemours",
+    "area_ids": [67, 1, 68, 88, 69]
+  },
+  {
+    "name": "Nord Fontainebleau",
+    "area_ids": [76]
+  },
+  {
+    "name": "Sud Fontainebleau",
+    "area_ids": [70, 71, 83, 84, 85, 86]
+  },
+  {
+    "name": "Vallée de l'École",
+    "area_ids": [87]
+  },
+  {
+    "name": "Orsay",
+    "area_ids": [72, 73]
+  }
+]

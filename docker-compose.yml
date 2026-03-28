@@ -1,16 +1,17 @@
 services:
   db:
     image: postgis/postgis:16-3.4
+    env_file: .env
     environment:
-      POSTGRES_USER: secbleau
-      POSTGRES_PASSWORD: secbleau
-      POSTGRES_DB: secbleau
+      POSTGRES_USER: ${DB_USER:-secbleau}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secbleau}
+      POSTGRES_DB: ${DB_NAME:-secbleau}
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U secbleau"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-secbleau} -d ${DB_NAME:-secbleau}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -18,8 +19,6 @@ services:
   api:
     build: ./backend
     env_file: .env
-    environment:
-      DATABASE_URL: postgresql+asyncpg://secbleau:secbleau@db:5432/secbleau
     ports:
       - "8000:8000"
     depends_on:

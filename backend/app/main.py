@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 
 from .config import get_settings
 from .database import engine, Base
@@ -43,14 +44,21 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     logger.info("Scheduler started with %d jobs", len(scheduler.get_jobs()))
 
-    # Run an immediate fetch + score compute so scores are never stale after restart
-    logger.info("Running startup weather fetch and score computation...")
+    # Run startup fetch + score compute in the background so the API
+    # is immediately available and not blocked during the ~60s computation.
+    import asyncio
     from .database import AsyncSessionLocal
-    async with AsyncSessionLocal() as db:
-        await fetch_weather_for_all_areas(db)
-    async with AsyncSessionLocal() as db:
-        await recompute_all_dryness_scores(db)
-    logger.info("Startup fetch and score computation complete")
+
+    async def _startup_refresh():
+        logger.info("Background startup: fetching weather...")
+        async with AsyncSessionLocal() as db:
+            await fetch_weather_for_all_areas(db)
+        logger.info("Background startup: recomputing scores...")
+        async with AsyncSessionLocal() as db:
+            await recompute_all_dryness_scores(db)
+        logger.info("Background startup: complete")
+
+    asyncio.create_task(_startup_refresh())
 
     yield
 
@@ -63,22 +71,25 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     settings = get_settings()
 
+    is_dev = settings.environment == "development"
+
     app = FastAPI(
         title="SecBleau API",
         description="Fontainebleau bouldering dryness prediction",
         version="1.0.0",
         lifespan=lifespan,
-        docs_url="/api/docs",
-        redoc_url="/api/redoc",
-        openapi_url="/api/openapi.json",
+        docs_url="/api/docs" if is_dev else None,
+        redoc_url="/api/redoc" if is_dev else None,
+        openapi_url="/api/openapi.json" if is_dev else None,
     )
 
+    app.add_middleware(GZipMiddleware, minimum_size=1000)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins_list,
         allow_credentials=True,
         allow_methods=["GET", "POST"],
-        allow_headers=["*"],
+        allow_headers=["Content-Type", "Accept"],
     )
 
     app.include_router(areas.router, prefix="/api/v1")

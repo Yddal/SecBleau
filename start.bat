@@ -22,9 +22,17 @@ REM Copy .env if not present
 if not exist ".env" (
     echo  First run detected — creating .env from .env.example
     copy ".env.example" ".env" >nul
-    echo  NOTE: Edit .env if you want to add Netatmo credentials.
+    echo  NOTE: Edit .env to set credentials and optional Netatmo keys.
     echo.
 )
+
+REM Read DB_USER and DB_NAME from .env for healthcheck
+for /f "usebackq tokens=1,2 delims==" %%a in (".env") do (
+    if "%%a"=="DB_USER" set DB_USER=%%b
+    if "%%a"=="DB_NAME" set DB_NAME=%%b
+)
+if "%DB_USER%"=="" set DB_USER=secbleau
+if "%DB_NAME%"=="" set DB_NAME=secbleau_db
 
 REM Start containers
 echo  Starting containers...
@@ -39,7 +47,7 @@ if errorlevel 1 (
 echo.
 echo  Waiting for database to be ready...
 :wait_db
-docker compose exec db pg_isready -U secbleau >nul 2>&1
+docker compose exec db pg_isready -U %DB_USER% -d %DB_NAME% >nul 2>&1
 if errorlevel 1 (
     timeout /t 2 /nobreak >nul
     goto wait_db

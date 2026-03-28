@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json as json_mod
 import logging
@@ -10,7 +11,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from fastapi.responses import JSONResponse
-from sqlalchemy import select, func, and_, text
+from pydantic import BaseModel, Field
+from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
@@ -139,108 +141,74 @@ async def list_areas(
     collection = AreaFeatureCollection(features=features)
     return JSONResponse(
         content=collection.model_dump(mode="json"),
-        headers={"Cache-Control": "public, max-age=300, stale-while-revalidate=600"},
+        headers={"Cache-Control": "public, max-age=60, stale-while-revalidate=120"},
     )
 
 
-CLUSTERS_CACHE_PATH = Path("/app/data/boolder-data/clusters.geojson")
+AREA_CLUSTERS_PATH = Path("/app/data/area_clusters.json")
+
+
+def _load_clusters() -> list[dict]:
+    """Load canonical cluster definitions from area_clusters.json."""
+    if not AREA_CLUSTERS_PATH.exists():
+        return []
+    return json_mod.loads(AREA_CLUSTERS_PATH.read_text(encoding="utf-8"))
 
 
 @router.get("/clusters")
 async def get_clusters(db: AsyncSession = Depends(get_db)):
     """
-    Returns clusters.geojson enriched with average dryness score.
-    Clusters are the major sectors (Trois Pignons, Franchard, etc.)
+    GeoJSON FeatureCollection of cluster hull polygons coloured by best dryness score.
+    Each cluster is defined by an explicit list of area IDs in area_clusters.json.
     """
-    if not CLUSTERS_CACHE_PATH.exists():
+    clusters = _load_clusters()
+    if not clusters:
         return {"type": "FeatureCollection", "features": []}
 
-    data = json_mod.loads(CLUSTERS_CACHE_PATH.read_text(encoding="utf-8"))
+    features = []
+    for cluster in clusters:
+        name = cluster["name"]
+        area_ids = cluster["area_ids"]
 
-    enriched = []
-    for feat in data.get("features", []):
-        props = feat.get("properties", {})
-        geom = feat.get("geometry", {})
-        has_bbox = all(props.get(k) is not None for k in ("southWestLat", "southWestLon", "northEastLat", "northEastLon"))
-        has_polygon = geom.get("type") in ("Polygon", "MultiPolygon")
-
-        if has_bbox:
-            sw_lat = float(props["southWestLat"])
-            sw_lon = float(props["southWestLon"])
-            ne_lat = float(props["northEastLat"])
-            ne_lon = float(props["northEastLon"])
-
-            area_result = await db.execute(
-                select(Area.id, DrynessScore.score)
-                .outerjoin(DrynessScore, and_(
-                    DrynessScore.area_id == Area.id,
-                    DrynessScore.boulder_id == None,
-                ))
-                .where(
-                    Area.lat >= sw_lat,
-                    Area.lat <= ne_lat,
-                    Area.lon >= sw_lon,
-                    Area.lon <= ne_lon,
-                )
-                .order_by(DrynessScore.computed_at.desc())
-            )
-            rows = area_result.all()
-
-            hull_result = await db.execute(
-                text("""
-                    SELECT ST_AsGeoJSON(
-                        ST_Buffer(
-                            ST_ConvexHull(ST_Collect(ST_MakePoint(lon, lat))),
-                            0.004,
-                            'quad_segs=6'
-                        )
-                    ) AS hull
-                    FROM areas
-                    WHERE lat >= :sw_lat AND lat <= :ne_lat
-                      AND lon >= :sw_lon AND lon <= :ne_lon
-                """),
-                {"sw_lat": sw_lat, "ne_lat": ne_lat, "sw_lon": sw_lon, "ne_lon": ne_lon},
-            )
-            hull_row = hull_result.fetchone()
-            hull_geom = json_mod.loads(hull_row.hull) if hull_row and hull_row.hull else None
-
-        elif has_polygon:
-            # Use ST_Contains with the existing polygon geometry to find contained areas
-            geom_json = json_mod.dumps(geom)
-            area_result = await db.execute(text("""
-                SELECT a.id, ds.score
-                FROM areas a
-                LEFT JOIN LATERAL (
-                    SELECT score FROM dryness_scores
-                    WHERE area_id = a.id AND boulder_id IS NULL
-                    ORDER BY computed_at DESC LIMIT 1
-                ) ds ON true
-                WHERE ST_Contains(
-                    ST_GeomFromGeoJSON(:geom),
-                    ST_SetSRID(ST_MakePoint(a.lon, a.lat), 4326)
-                )
-            """), {"geom": geom_json})
-            rows = area_result.all()
-            hull_geom = None  # polygon geometry already in the feature
-
-        else:
-            rows = []
-            hull_geom = None
-
-        scores = [r.score for r in rows if r.score is not None]
+        # Best dryness score across all areas in the cluster
+        scores_result = await db.execute(text("""
+            SELECT DISTINCT ON (area_id) score
+            FROM dryness_scores
+            WHERE area_id = ANY(:ids)
+              AND boulder_id IS NULL
+            ORDER BY area_id, computed_at DESC
+        """), {"ids": area_ids})
+        scores = [r.score for r in scores_result if r.score is not None]
         best_score = max(scores) if scores else None
 
-        enriched.append({
-            **feat,
+        # Convex hull polygon buffered slightly so thin clusters don't collapse to a line
+        hull_result = await db.execute(text("""
+            SELECT ST_AsGeoJSON(
+                ST_Buffer(
+                    ST_ConvexHull(ST_Collect(ST_SetSRID(ST_MakePoint(lon, lat), 4326))),
+                    0.004,
+                    'quad_segs=6'
+                )
+            ) AS hull
+            FROM areas
+            WHERE id = ANY(:ids)
+        """), {"ids": area_ids})
+        hull_row = hull_result.fetchone()
+        if not (hull_row and hull_row.hull):
+            continue
+        hull_geom = json_mod.loads(hull_row.hull)
+
+        features.append({
+            "type": "Feature",
+            "geometry": hull_geom,
             "properties": {
-                **props,
+                "name": name,
                 "dryness_score": best_score,
-                "area_count": len(rows),
-                "hull": hull_geom,
-            }
+                "area_count": len(area_ids),
+            },
         })
 
-    return {"type": "FeatureCollection", "features": enriched}
+    return {"type": "FeatureCollection", "features": features}
 
 
 @router.get("/analysis")
@@ -249,19 +217,17 @@ async def get_areas_analysis(db: AsyncSession = Depends(get_db)):
     Per-area analysis data for the Analysis page.
     Returns all areas grouped by cluster with dryness breakdown,
     physical characteristics, and report counts for 4h / 12h / 24h windows.
+    Cluster membership is defined by area_clusters.json.
     """
-    if not CLUSTERS_CACHE_PATH.exists():
-        return JSONResponse(content={"generated_at": datetime.now(timezone.utc).isoformat(), "clusters": []})
-
-    cluster_data = json_mod.loads(CLUSTERS_CACHE_PATH.read_text(encoding="utf-8"))
+    clusters = _load_clusters()
 
     result = await db.execute(select(Area))
     all_areas = result.scalars().all()
+    now = datetime.now(timezone.utc)
     if not all_areas:
-        return JSONResponse(content={"generated_at": datetime.now(timezone.utc).isoformat(), "clusters": []})
+        return JSONResponse(content={"generated_at": now.isoformat(), "clusters": []})
 
     area_ids = [a.id for a in all_areas]
-    now = datetime.now(timezone.utc)
     cutoff_4h  = now - timedelta(hours=4)
     cutoff_12h = now - timedelta(hours=12)
     cutoff_24h = now - timedelta(hours=24)
@@ -319,51 +285,182 @@ async def get_areas_analysis(db: AsyncSession = Depends(get_db)):
             "p":  round(row.precip,   2) if row.precip   is not None else None,
         })
 
-    # Group areas into clusters using bounding boxes from clusters.geojson
+    def _area_dict(area: Area) -> dict:
+        s  = scores_by_area.get(area.id)
+        rc = report_counts.get(area.id)
+        return {
+            "id":            area.id,
+            "name":          area.name,
+            "aspect":        area.aspect,
+            "shade_factor":  area.shade_factor,
+            "canopy_factor": area.canopy_factor,
+            "elevation_m":   area.elevation_m,
+            "dryness_score": s.score          if s else None,
+            "physics_score": s.physics_score  if s else None,
+            "ml_correction": s.ml_correction  if s else None,
+            "confidence":    s.confidence     if s else 0.0,
+            "is_estimated":  s.is_estimated   if s else True,
+            "hours_since_rain": s.hours_since_rain if s else None,
+            "last_rain_mm":     s.last_rain_mm     if s else None,
+            "report_count_4h":  int(rc.count_4h)  if rc else 0,
+            "report_count_12h": int(rc.count_12h) if rc else 0,
+            "report_count_24h": int(rc.count_24h) if rc else 0,
+            "weather_72h":      weather_hourly.get(area.id, []),
+        }
+
+    area_by_id = {a.id: a for a in all_areas}
+    assigned_ids: set[int] = set()
     clusters_out = []
-    for feat in cluster_data.get("features", []):
-        props = feat.get("properties", {})
-        sw_lat = float(props.get("southWestLat", 0))
-        sw_lon = float(props.get("southWestLon", 0))
-        ne_lat = float(props.get("northEastLat", 0))
-        ne_lon = float(props.get("northEastLon", 0))
-        cluster_name = props.get("name", "")
 
-        cluster_areas = []
-        for area in all_areas:
-            if sw_lat <= area.lat <= ne_lat and sw_lon <= area.lon <= ne_lon:
-                s  = scores_by_area.get(area.id)
-                rc = report_counts.get(area.id)
-                cluster_areas.append({
-                    "id":            area.id,
-                    "name":          area.name,
-                    "aspect":        area.aspect,
-                    "shade_factor":  area.shade_factor,
-                    "canopy_factor": area.canopy_factor,
-                    "elevation_m":   area.elevation_m,
-                    "dryness_score": s.score          if s else None,
-                    "physics_score": s.physics_score  if s else None,
-                    "ml_correction": s.ml_correction  if s else None,
-                    "confidence":    s.confidence     if s else 0.0,
-                    "is_estimated":  s.is_estimated   if s else True,
-                    "hours_since_rain": s.hours_since_rain if s else None,
-                    "last_rain_mm":     s.last_rain_mm     if s else None,
-                    "report_count_4h":  int(rc.count_4h)  if rc else 0,
-                    "report_count_12h": int(rc.count_12h) if rc else 0,
-                    "report_count_24h": int(rc.count_24h) if rc else 0,
-                    "weather_72h":      weather_hourly.get(area.id, []),
-                })
-
+    for cluster in clusters:
+        cluster_name = cluster["name"]
+        cluster_area_ids = cluster["area_ids"]
+        cluster_areas = [
+            _area_dict(area_by_id[aid])
+            for aid in cluster_area_ids
+            if aid in area_by_id
+        ]
+        for aid in cluster_area_ids:
+            if aid in area_by_id:
+                assigned_ids.add(aid)
         if cluster_areas:
             clusters_out.append({
                 "name":  cluster_name,
                 "areas": sorted(cluster_areas, key=lambda x: x["name"]),
             })
 
+    # Areas not listed in any cluster go into "Other"
+    unassigned = [_area_dict(a) for a in all_areas if a.id not in assigned_ids]
+    if unassigned:
+        clusters_out.append({
+            "name":  "Other",
+            "areas": sorted(unassigned, key=lambda x: x["name"]),
+        })
+
     return JSONResponse(
         content={"generated_at": now.isoformat(), "clusters": clusters_out},
-        headers={"Cache-Control": "public, max-age=60, stale-while-revalidate=300"},
+        headers={"Cache-Control": "public, max-age=60, stale-while-revalidate=120"},
     )
+
+
+_VALID_ASPECTS = {"N", "NE", "E", "SE", "S", "SW", "W", "NW", "flat"}
+
+
+class AreaSettingsPatch(BaseModel):
+    aspect: Optional[str] = None
+    shade_factor: Optional[float] = Field(None, ge=0.0, le=1.0)
+    canopy_factor: Optional[float] = Field(None, ge=0.0, le=1.0)
+    elevation_m: Optional[int] = Field(None, ge=0, le=5000)
+
+
+@router.get("/settings")
+async def get_settings(db: AsyncSession = Depends(get_db)):
+    """
+    Returns all areas with their physical factors and current dryness scores,
+    grouped by cluster — used by the /settings admin page.
+    """
+    clusters = _load_clusters()
+    result = await db.execute(select(Area))
+    all_areas = result.scalars().all()
+
+    area_ids = [a.id for a in all_areas]
+    scores_result = await db.execute(text("""
+        SELECT DISTINCT ON (area_id)
+            area_id, score, hours_since_rain
+        FROM dryness_scores
+        WHERE boulder_id IS NULL AND area_id = ANY(:ids)
+        ORDER BY area_id, computed_at DESC
+    """), {"ids": area_ids})
+    scores_by_area = {row.area_id: row for row in scores_result}
+
+    def _area_row(a: Area) -> dict:
+        s = scores_by_area.get(a.id)
+        return {
+            "id": a.id,
+            "name": a.name,
+            "aspect": a.aspect,
+            "shade_factor": a.shade_factor,
+            "canopy_factor": a.canopy_factor,
+            "elevation_m": a.elevation_m,
+            "dryness_score": s.score if s else None,
+            "hours_since_rain": s.hours_since_rain if s else None,
+        }
+
+    area_by_id = {a.id: a for a in all_areas}
+    assigned_ids: set[int] = set()
+    clusters_out = []
+
+    for cluster in clusters:
+        cluster_areas = [
+            _area_row(area_by_id[aid])
+            for aid in cluster["area_ids"]
+            if aid in area_by_id
+        ]
+        for aid in cluster["area_ids"]:
+            if aid in area_by_id:
+                assigned_ids.add(aid)
+        if cluster_areas:
+            clusters_out.append({
+                "name": cluster["name"],
+                "areas": sorted(cluster_areas, key=lambda x: x["name"]),
+            })
+
+    unassigned = [_area_row(a) for a in all_areas if a.id not in assigned_ids]
+    if unassigned:
+        clusters_out.append({"name": "Other", "areas": sorted(unassigned, key=lambda x: x["name"])})
+
+    return JSONResponse(content={"clusters": clusters_out})
+
+
+@router.post("/{area_id}/settings")
+async def update_area_settings(
+    area_id: int,
+    body: AreaSettingsPatch,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update physical drying factors for an area."""
+    result = await db.execute(select(Area).where(Area.id == area_id))
+    area = result.scalar_one_or_none()
+    if not area:
+        raise HTTPException(status_code=404, detail="Area not found")
+
+    if body.aspect is not None:
+        if body.aspect not in _VALID_ASPECTS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid aspect '{body.aspect}'. Valid values: {', '.join(sorted(_VALID_ASPECTS))}",
+            )
+        area.aspect = body.aspect
+    if body.shade_factor is not None:
+        area.shade_factor = body.shade_factor
+    if body.canopy_factor is not None:
+        area.canopy_factor = body.canopy_factor
+    if body.elevation_m is not None:
+        area.elevation_m = body.elevation_m
+
+    await db.commit()
+    return {
+        "id": area.id,
+        "aspect": area.aspect,
+        "shade_factor": area.shade_factor,
+        "canopy_factor": area.canopy_factor,
+        "elevation_m": area.elevation_m,
+    }
+
+
+@router.post("/recalculate")
+async def recalculate_scores():
+    """Trigger a background recompute of all dryness scores."""
+    from ..database import AsyncSessionLocal
+    from ..tasks.update_scores import recompute_all_dryness_scores
+
+    async def _bg() -> None:
+        async with AsyncSessionLocal() as db:
+            await recompute_all_dryness_scores(db)
+        logger.info("Manual recalculation complete")
+
+    asyncio.create_task(_bg())
+    return {"status": "started", "message": "Score recomputation started. Refresh in ~30 seconds."}
 
 
 @router.get("/{area_id}", response_model=AreaDetail)

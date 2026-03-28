@@ -5,15 +5,15 @@ from functools import lru_cache
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # Database
-    database_url: str = "postgresql+asyncpg://secbleau:secbleau@localhost:5432/secbleau"
+    # Database — must be set via DATABASE_URL environment variable
+    database_url: str = "postgresql+asyncpg://localhost:5432/secbleau"
 
     # Netatmo (optional)
     netatmo_client_id: str = ""
     netatmo_client_secret: str = ""
 
     # App
-    environment: str = "development"
+    environment: str = "production"
     log_level: str = "INFO"
     cors_origins: str = "http://localhost:5173,http://localhost:3000"
 

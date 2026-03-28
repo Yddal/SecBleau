@@ -80,6 +80,7 @@
     <div class="tagline">Drying conditions — last 72 h</div>
     <a class="nav-link" href="/">← Map</a>
     <a class="nav-link" href="/analysis">Analysis</a>
+
     <div class="spacer"></div>
     <a class="nav-link" href="/about">About</a>
     <a class="nav-link" href="/privacy">Privacy</a>

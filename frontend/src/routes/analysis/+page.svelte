@@ -195,6 +195,14 @@
   // ── Weather chart ──────────────────────────────────────────────────────────
   interface ChartBar   { x: number; y: number; w: number; h: number; }
   interface ChartLabel { x: number; label: string; }
+  interface ChartPoint {
+    x: number; ms: number;
+    t:  number | null; yT:  number | null;
+    hu: number | null; yHu: number | null;
+    w:  number | null; yW:  number | null;
+    p: number;
+    timeLabel: string;
+  }
   interface ChartResult {
     tempPath: string; humidPath: string; windPath: string;
     rainBars: ChartBar[]; xLabels: ChartLabel[];
@@ -202,6 +210,7 @@
     tempLo: number; tempHi: number;
     svgH: number; lineBotY: number; rainTopY: number; rainBotY: number;
     x0: number;
+    points: ChartPoint[];
   }
 
   function makeChart(data: WeatherHour[]): ChartResult | null {
@@ -263,6 +272,22 @@
       }
     }
 
+    const points: ChartPoint[] = data.map((d, i) => ({
+      x:  xOf(i),
+      ms: ms[i],
+      t:   d.t  ?? null,
+      yT:  d.t  != null ? yTemp(d.t)   : null,
+      hu:  d.hu ?? null,
+      yHu: d.hu != null ? yHumid(d.hu) : null,
+      w:   d.w  ?? null,
+      yW:  d.w  != null ? yWind(d.w)   : null,
+      p:   d.p  ?? 0,
+      timeLabel: new Date(ms[i]).toLocaleString('en-GB', {
+        timeZone: PARIS, day: 'numeric', month: 'short',
+        hour: '2-digit', minute: '2-digit',
+      }),
+    }));
+
     return {
       tempPath: buildPath(yTemp,  data.map(d => d.t)),
       humidPath: buildPath(yHumid, data.map(d => d.hu)),
@@ -271,7 +296,7 @@
       precipMax, windMax: Math.round(windMax),
       tempLo: Math.round(tempLo), tempHi: Math.round(tempHi),
       svgH: SVG_H, lineBotY: LINE_BOT, rainTopY: RAIN_TOP, rainBotY: RAIN_BOT,
-      x0: X0,
+      x0: X0, points,
     };
   }
 
@@ -284,6 +309,41 @@
     const next = new Set(current);
     if (next.has(line)) next.delete(line); else next.add(line);
     visibleLines = new Map(visibleLines).set(areaId, next);
+  }
+
+  // ── Chart hover / click ────────────────────────────────────────────────────
+  interface ChartInteraction { areaId: number; ptIdx: number; }
+  let chartHover:  ChartInteraction | null = null;
+  let chartPinned: ChartInteraction | null = null;
+
+  function chartNearestIdx(e: MouseEvent, chart: ChartResult): number {
+    const svg = (e.currentTarget as SVGElement).closest('svg') as SVGSVGElement;
+    const { left, width } = svg.getBoundingClientRect();
+    const svgX = ((e.clientX - left) / width) * 720;
+    let best = 0, bestD = Infinity;
+    for (let i = 0; i < chart.points.length; i++) {
+      const d = Math.abs(chart.points[i].x - svgX);
+      if (d < bestD) { bestD = d; best = i; }
+    }
+    return best;
+  }
+
+  function chartMouseMove(e: MouseEvent, areaId: number, chart: ChartResult) {
+    chartHover = { areaId, ptIdx: chartNearestIdx(e, chart) };
+  }
+
+  function chartMouseLeave(areaId: number) {
+    if (chartHover?.areaId === areaId) chartHover = null;
+  }
+
+  function chartClick(e: MouseEvent, areaId: number, chart: ChartResult) {
+    const idx = chartNearestIdx(e, chart);
+    if (chartPinned?.areaId === areaId && chartPinned.ptIdx === idx) {
+      chartPinned = null;
+    } else {
+      chartPinned = { areaId, ptIdx: idx };
+    }
+    e.stopPropagation();
   }
 
   // ── Report status tab ──────────────────────────────────────────────────────
@@ -310,6 +370,7 @@
     <div class="tagline">Sector analysis</div>
     <a class="nav-link" href="/">← Map</a>
     <a class="nav-link" href="/conditions">Conditions</a>
+
     <div class="spacer"></div>
     <a class="nav-link" href="/about">About</a>
     <a class="nav-link" href="/privacy">Privacy</a>
@@ -394,6 +455,11 @@
                                 <button class="legend-item rain"  class:dim={!vis.has('rain')}  on:click={() => toggleLine(area.id, 'rain')}>▊ Rain</button>
                               </div>
                               {#if chart}
+                                {@const _isPinned = chartPinned !== null && chartPinned.areaId === area.id}
+                                {@const _isHover  = chartHover  !== null && chartHover.areaId  === area.id}
+                                {@const _activeIdx = _isPinned && chartPinned ? chartPinned.ptIdx
+                                                   : _isHover  && chartHover  ? chartHover.ptIdx
+                                                   : null}
                                 <svg viewBox="0 0 720 {chart.svgH}" class="weather-svg" xmlns="http://www.w3.org/2000/svg">
 
                                   <!-- Horizontal grid lines (line zone) -->
@@ -451,6 +517,52 @@
                                   <!-- Y-axis scale: rain max (left, rain zone) -->
                                   <text x={chart.x0 - 2} y={chart.rainBotY}
                                         font-size="7" fill="#3b82f6" text-anchor="end">{chart.precipMax.toFixed(1)}mm</text>
+
+                                  <!-- Crosshair + tooltip (rendered before overlay so overlay is topmost for events) -->
+                                  {#if _activeIdx !== null}
+                                    {@const pt = chart.points[_activeIdx]}
+                                    {@const TIP_W = 110}
+                                    {@const TIP_H = _isPinned ? 76 : 64}
+                                    {@const tipX = pt.x + 8 + TIP_W > 716 ? pt.x - TIP_W - 8 : pt.x + 8}
+                                    <g pointer-events="none">
+                                      <!-- Vertical crosshair -->
+                                      <line x1={pt.x} y1={chart.lineBotY - 72} x2={pt.x} y2={chart.rainBotY}
+                                            stroke="#6b7280" stroke-width="0.8" stroke-dasharray="2,2" />
+                                      <!-- Dot markers on visible lines -->
+                                      {#if vis.has('temp') && pt.yT !== null}
+                                        <circle cx={pt.x} cy={pt.yT} r="2.5" fill="#f97316" stroke="white" stroke-width="0.8" />
+                                      {/if}
+                                      {#if vis.has('humid') && pt.yHu !== null}
+                                        <circle cx={pt.x} cy={pt.yHu} r="2.5" fill="#06b6d4" stroke="white" stroke-width="0.8" />
+                                      {/if}
+                                      {#if vis.has('wind') && pt.yW !== null}
+                                        <circle cx={pt.x} cy={pt.yW} r="2.5" fill="#8b5cf6" stroke="white" stroke-width="0.8" />
+                                      {/if}
+                                      <!-- Tooltip box -->
+                                      <g transform="translate({tipX}, 4)">
+                                        <rect width={TIP_W} height={TIP_H} rx="3"
+                                              fill="white"
+                                              stroke={_isPinned ? '#1f2937' : '#d1d5db'}
+                                              stroke-width={_isPinned ? 1.2 : 0.7} />
+                                        <text x="5" y="12" font-size="7.5" fill="#374151" font-weight="bold">{pt.timeLabel}</text>
+                                        <text x="5" y="24" font-size="7.5" fill="#f97316">{pt.t  !== null ? pt.t.toFixed(1)  + ' °C'  : '—'}</text>
+                                        <text x="5" y="36" font-size="7.5" fill="#06b6d4">{pt.hu !== null ? pt.hu.toFixed(0) + ' %'   : '—'}</text>
+                                        <text x="5" y="48" font-size="7.5" fill="#8b5cf6">{pt.w  !== null ? pt.w.toFixed(1)  + ' m/s' : '—'}</text>
+                                        <text x="5" y="60" font-size="7.5" fill="#3b82f6">{pt.p.toFixed(1)} mm</text>
+                                        {#if _isPinned}
+                                          <line x1="4" y1="65" x2={TIP_W - 4} y2="65" stroke="#e5e7eb" stroke-width="0.5" />
+                                          <text x={TIP_W / 2} y="73" font-size="6.5" fill="#9ca3af" text-anchor="middle">click chart to close</text>
+                                        {/if}
+                                      </g>
+                                    </g>
+                                  {/if}
+
+                                  <!-- Transparent overlay — last child so it's topmost for event capture -->
+                                  <rect x={chart.x0} y={0} width={694} height={chart.svgH}
+                                        fill="none" pointer-events="all" style="cursor: crosshair"
+                                        on:mousemove={(e) => chartMouseMove(e, area.id, chart)}
+                                        on:mouseleave={() => chartMouseLeave(area.id)}
+                                        on:click={(e) => chartClick(e, area.id, chart)} />
                                 </svg>
                               {/if}
                             </div>

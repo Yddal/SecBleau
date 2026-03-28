@@ -1,5 +1,8 @@
-# Environment
+# Environment — never commit real credentials
 .env
+.env.local
+.env.*.local
+docker-compose.override.yml
 
 # Python
 __pycache__/
@@ -19,3 +22,6 @@ frontend/build/
 
 # Docker
 *.log
+
+# Database backups — kept locally, never committed
+backups/

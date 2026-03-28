@@ -243,6 +243,48 @@ export interface RecentReportsResponse {
   reports: RecentReport[];
 }
 
+export interface AreaSetting {
+  id: number;
+  name: string;
+  aspect: string | null;
+  shade_factor: number | null;
+  canopy_factor: number | null;
+  elevation_m: number | null;
+  dryness_score: number | null;
+  hours_since_rain: number | null;
+}
+
+export interface ClusterSettings {
+  name: string;
+  areas: AreaSetting[];
+}
+
+export interface SettingsResponse {
+  clusters: ClusterSettings[];
+}
+
+async function patch<T>(path: string, body: unknown): Promise<T> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  try {
+    const res = await fetch(`${BASE}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error((data as { detail?: string }).detail || `API error ${res.status}`);
+    }
+    return res.json() as Promise<T>;
+  } catch (e) {
+    clearTimeout(timer);
+    throw e;
+  }
+}
+
 export const api = {
   getAreas: () => get<AreaFeatureCollection>('/areas'),
   getAreaBoulders: (areaId: number) => get<BoulderFeatureCollection>(`/areas/${areaId}/boulders`),
@@ -262,4 +304,10 @@ export const api = {
   getAnalysis: () => get<AnalysisResponse>('/areas/analysis'),
   getRecentReports: (hours = 48, limit = 100) =>
     get<RecentReportsResponse>(`/reports/recent?hours=${hours}&limit=${limit}`),
+
+  getSettings: () => get<SettingsResponse>('/areas/settings'),
+  saveAreaSettings: (id: number, body: Partial<AreaSetting>) =>
+    patch<AreaSetting>(`/areas/${id}/settings`, body),
+  recalculateScores: () =>
+    patch<{ status: string; message: string }>('/areas/recalculate', {}),
 };

@@ -12,13 +12,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import get_db
 from ..models.area import Area
-from ..models.dryness import DrynessScore  # for avg dryness score
 from ..models.weather import WeatherReading
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/weather", tags=["weather"])
 
-CLUSTERS_CACHE_PATH = Path("/app/data/boolder-data/clusters.geojson")
+AREA_CLUSTERS_PATH = Path("/app/data/area_clusters.json")
+
+
+def _load_clusters() -> list[dict]:
+    if not AREA_CLUSTERS_PATH.exists():
+        return []
+    return json_mod.loads(AREA_CLUSTERS_PATH.read_text(encoding="utf-8"))
 
 
 def _make_tz_aware(dt: datetime) -> datetime:
@@ -31,13 +36,13 @@ async def get_conditions(db: AsyncSession = Depends(get_db)):
     Per-cluster weather summary for the last 72 h.
     Returns precipitation history, current conditions, and drying factors
     used by the physics model.
+    Cluster membership is defined by area_clusters.json.
     """
-    if not CLUSTERS_CACHE_PATH.exists():
-        return {"generated_at": datetime.now(timezone.utc).isoformat(), "clusters": []}
-
-    data = json_mod.loads(CLUSTERS_CACHE_PATH.read_text(encoding="utf-8"))
-
+    clusters = _load_clusters()
     now = datetime.now(timezone.utc)
+    if not clusters:
+        return {"generated_at": now.isoformat(), "clusters": []}
+
     cutoff_72h = now - timedelta(hours=72)
     cutoff_48h = now - timedelta(hours=48)
     cutoff_24h = now - timedelta(hours=24)
@@ -45,29 +50,22 @@ async def get_conditions(db: AsyncSession = Depends(get_db)):
     RAIN_THRESHOLD = 0.1  # mm/h — matches dryness model
 
     result = []
-    for feat in data.get("features", []):
-        props = feat.get("properties", {})
-        sw_lat = float(props.get("southWestLat", 0))
-        sw_lon = float(props.get("southWestLon", 0))
-        ne_lat = float(props.get("northEastLat", 0))
-        ne_lon = float(props.get("northEastLon", 0))
-        name = props.get("name", "")
-        center_lat = round((sw_lat + ne_lat) / 2, 4)
-        center_lon = round((sw_lon + ne_lon) / 2, 4)
+    for cluster in clusters:
+        name     = cluster["name"]
+        area_ids = cluster["area_ids"]
 
-        # Areas in cluster bbox
-        area_result = await db.execute(
-            select(Area.id).where(
-                Area.lat >= sw_lat, Area.lat <= ne_lat,
-                Area.lon >= sw_lon, Area.lon <= ne_lon,
-            )
+        # Center lat/lon — average of area coordinates in the DB
+        center_result = await db.execute(
+            select(func.avg(Area.lat).label("lat"), func.avg(Area.lon).label("lon"))
+            .where(Area.id.in_(area_ids))
         )
-        area_ids = [r.id for r in area_result.all()]
-        if not area_ids:
+        center_row = center_result.one_or_none()
+        if center_row is None or center_row.lat is None:
             continue
+        center_lat = round(float(center_row.lat), 4)
+        center_lon = round(float(center_row.lon), 4)
 
-        # Hourly precipitation averaged across areas
-        # Hourly precipitation over 7 days — used for hours_since_rain and chart
+        # Hourly precipitation averaged across cluster areas over 7 days
         hourly_result = await db.execute(
             select(
                 func.date_trunc("hour", WeatherReading.recorded_at).label("hour"),
@@ -107,7 +105,9 @@ async def get_conditions(db: AsyncSession = Depends(get_db)):
                 last_rain_hour = _make_tz_aware(row.hour)
                 last_rain_mm_val = round(float(row.avg_mm), 2)
                 break
-        hours_since_rain = round((now - last_rain_hour).total_seconds() / 3600, 1) if last_rain_hour else None
+        hours_since_rain = (
+            round((now - last_rain_hour).total_seconds() / 3600, 1) if last_rain_hour else None
+        )
 
         # Chart shows only last 72 h
         hourly_rain = [
@@ -116,7 +116,7 @@ async def get_conditions(db: AsyncSession = Depends(get_db)):
             if _make_tz_aware(r.hour) >= cutoff_72h
         ]
 
-        # Most recent *past* weather reading for current conditions (exclude forecast rows)
+        # Most recent *past* weather reading for current conditions
         latest_result = await db.execute(
             select(WeatherReading)
             .where(
@@ -144,7 +144,9 @@ async def get_conditions(db: AsyncSession = Depends(get_db)):
         # Meteoblue history URL — format: {lat}N{lon}E  (Fontainebleau is always N/E)
         lat_str = f"{abs(center_lat):.3f}N"
         lon_str = f"{abs(center_lon):.3f}E"
-        meteoblue_url = f"https://www.meteoblue.com/en/weather/historyclimate/weatherarchive/{lat_str}{lon_str}"
+        meteoblue_url = (
+            f"https://www.meteoblue.com/en/weather/historyclimate/weatherarchive/{lat_str}{lon_str}"
+        )
 
         result.append({
             "name": name,
@@ -169,5 +171,5 @@ async def get_conditions(db: AsyncSession = Depends(get_db)):
 
     return JSONResponse(
         content={"generated_at": now.isoformat(), "clusters": result},
-        headers={"Cache-Control": "public, max-age=300, stale-while-revalidate=3300"},
+        headers={"Cache-Control": "public, max-age=60, stale-while-revalidate=120"},
     )
