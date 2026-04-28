@@ -9,7 +9,7 @@ echo  ==============================
 echo.
 
 REM Read credentials from .env
-for /f "usebackq tokens=1,2 delims==" %%a in (".env") do (
+for /f "usebackq tokens=1,* delims==" %%a in (".env") do (
     if "%%a"=="DB_USER"     set DB_USER=%%b
     if "%%a"=="DB_PASSWORD" set DB_PASSWORD=%%b
     if "%%a"=="DB_NAME"     set DB_NAME=%%b
@@ -19,9 +19,8 @@ if "%DB_USER%"=="" set DB_USER=secbleau
 if "%DB_NAME%"==""  set DB_NAME=secbleau_db
 
 REM Build timestamped filename
-for /f "tokens=1-4 delims=/ " %%a in ('date /t') do set DATE_STR=%%d%%b%%c
-for /f "tokens=1-2 delims=:." %%a in ('time /t') do set TIME_STR=%%a%%b
-set TIME_STR=%TIME_STR: =0%
+for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd"') do set DATE_STR=%%i
+for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format HHmm"') do set TIME_STR=%%i
 set BACKUP_FILE=backups\secbleau_%DATE_STR%_%TIME_STR%.dump
 
 REM Create backups directory if needed
@@ -35,7 +34,7 @@ if errorlevel 1 (
 )
 
 REM Check db container is up
-docker compose ps db | findstr "running" >nul 2>&1
+docker compose ps db | findstr /i /c:"Up" /c:"running" >nul 2>&1
 if errorlevel 1 (
     echo  ERROR: Database container is not running. Run start.bat first.
     pause & exit /b 1
@@ -45,7 +44,7 @@ echo  Backing up database "%DB_NAME%" as user "%DB_USER%"...
 echo  Output: %BACKUP_FILE%
 echo.
 
-docker compose exec -T -e PGPASSWORD=%DB_PASSWORD% db ^
+docker compose exec -T -e "PGPASSWORD=%DB_PASSWORD%" db ^
     pg_dump -U %DB_USER% -d %DB_NAME% -Fc ^
     > "%BACKUP_FILE%"
 

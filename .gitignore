@@ -25,3 +25,6 @@ frontend/build/
 
 # Database backups — kept locally, never committed
 backups/
+
+# Files
+features.md

@@ -24,9 +24,9 @@ from typing import Optional
 
 # Fontainebleau sandstone absorption coefficient.
 # mm of rain → moisture units. Sandstone is quite absorbent.
-# A value of 0.18 means ~5.5mm of rain saturates the rock, which is more realistic
+# A value of 0.10 means ~10mm of rain saturates the rock, which is more realistic
 # for Bleau sandstone — especially under on/off rain where the surface never drains fully.
-PRECIP_TO_MOISTURE = 0.18   # 5.5 mm of rain saturates the rock
+PRECIP_TO_MOISTURE = 0.10   # 10 mm of rain saturates the rock
 
 # Minimum drying rate even at night / in fog (very slow but never zero)
 K_EVAP_MIN = 0.004  # ~0.4% moisture loss per hour at worst conditions

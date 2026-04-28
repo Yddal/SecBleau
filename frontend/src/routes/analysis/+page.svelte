@@ -346,6 +346,63 @@
     e.stopPropagation();
   }
 
+  // ── Filters ───────────────────────────────────────────────────────────────
+  let searchQuery = '';
+  let rainFilter: 4 | 12 | 24 | null = null;   // show areas with rain in last N hours
+  let scoreFilter: number | null = null;          // minimum dryness score
+  let quickDryingOnly = false;
+
+  $: filteredClusters = clusters.map(c => ({
+    ...c,
+    areas: c.areas.filter(area => {
+      if (searchQuery && !area.name.toLowerCase().includes(searchQuery.toLowerCase())) return false;
+      if (quickDryingOnly && !(
+        area.shade_factor !== null && area.canopy_factor !== null &&
+        area.shade_factor >= 0.85 && area.canopy_factor <= 0.15
+      )) return false;
+      if (scoreFilter !== null && (area.dryness_score === null || area.dryness_score < scoreFilter)) return false;
+      if (rainFilter !== null) {
+        const now = Date.now();
+        let hadRecentRain = false;
+        for (let i = area.weather_72h.length - 1; i >= 0; i--) {
+          if ((area.weather_72h[i].p ?? 0) > 0.1) {
+            hadRecentRain = (now - new Date(area.weather_72h[i].h).getTime()) / 3_600_000 <= rainFilter;
+            break;
+          }
+        }
+        if (!hadRecentRain) return false;
+      }
+      return true;
+    }),
+  })).filter(c => c.areas.length > 0);
+
+  $: totalFilteredAreas = filteredClusters.reduce((sum, c) => sum + c.areas.length, 0);
+  $: totalAreas = clusters.reduce((sum, c) => sum + c.areas.length, 0);
+  $: hasActiveFilter = !!searchQuery || rainFilter !== null || scoreFilter !== null || quickDryingOnly;
+
+  function clearFilters() {
+    searchQuery = '';
+    rainFilter = null;
+    scoreFilter = null;
+    quickDryingOnly = false;
+  }
+
+  function expandAll() {
+    for (const c of filteredClusters) {
+      expandedClusters.add(c.name);
+      for (const a of c.areas) expandedAreas.add(a.id);
+    }
+    expandedClusters = expandedClusters;
+    expandedAreas = expandedAreas;
+  }
+
+  function collapseAll() {
+    expandedClusters.clear();
+    expandedAreas.clear();
+    expandedClusters = expandedClusters;
+    expandedAreas = expandedAreas;
+  }
+
   // ── Report status tab ──────────────────────────────────────────────────────
   const CONDITION_COLOR: Record<string, string> = {
     wet: '#d73027', drying: '#fdae61', some_boulders_dry: '#a6d96a',
@@ -395,8 +452,46 @@
       {:else if clusters.length === 0}
         <div class="state">No sector data available.</div>
       {:else}
+        <!-- Filter bar -->
+        <div class="filter-bar">
+          <input class="search-input" type="text" placeholder="Search areas…" bind:value={searchQuery} />
+
+          <div class="filter-group">
+            <span class="filter-label">Rain in last</span>
+            {#each [4, 12, 24] as h (h)}
+              <button class="filter-btn" class:active={rainFilter === h}
+                on:click={() => { rainFilter = rainFilter === h ? null : h; }}>{h}h</button>
+            {/each}
+          </div>
+
+          <div class="filter-group">
+            <span class="filter-label">Score ≥</span>
+            {#each [[0.50, '50%'], [0.70, '70%'], [0.85, '85%']] as [s, lbl] (s)}
+              <button class="filter-btn" class:active={scoreFilter === s}
+                on:click={() => { scoreFilter = scoreFilter === s ? null : s; }}>{lbl}</button>
+            {/each}
+          </div>
+
+          <button class="filter-btn quick-btn" class:active={quickDryingOnly}
+            on:click={() => { quickDryingOnly = !quickDryingOnly; }}>⚡ Quick drying</button>
+
+          {#if hasActiveFilter}
+            <button class="clear-btn" on:click={clearFilters}>✕ Clear</button>
+            <span class="filter-count">{totalFilteredAreas} / {totalAreas} areas</span>
+          {/if}
+
+          <div class="spacer"></div>
+
+          <button class="action-btn" on:click={expandAll}>Expand all</button>
+          <button class="action-btn" on:click={collapseAll}>Close all</button>
+        </div>
+
+        {#if hasActiveFilter && filteredClusters.length === 0}
+          <div class="state">No areas match the current filters.</div>
+        {/if}
+
         <div class="cluster-list">
-          {#each clusters as cluster}
+          {#each filteredClusters as cluster}
             {@const avgScore = clusterAvg(cluster.areas)}
             {@const avgColor = scoreToColor(avgScore)}
             {@const isOpen   = expandedClusters.has(cluster.name)}
@@ -710,6 +805,55 @@
   .state { text-align: center; padding: 60px; color: #6b7280; font-size: 15px; }
   .state.error { color: #dc2626; }
 
+  /* ── Filter bar ─────────────────────────────────────────────────────────── */
+  .filter-bar {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    background: #fff; border-radius: 10px; padding: 10px 14px;
+    margin-bottom: 12px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+  }
+
+  .search-input {
+    font-size: 12px; padding: 5px 10px; border-radius: 6px;
+    border: 1px solid #d1d5db; outline: none; width: 150px;
+    transition: border-color 0.15s;
+  }
+  .search-input:focus { border-color: #a6d96a; }
+
+  .filter-group { display: flex; align-items: center; gap: 4px; }
+
+  .filter-label {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.05em; color: #9ca3af; white-space: nowrap; margin-right: 2px;
+  }
+
+  .filter-btn {
+    font-size: 11px; font-weight: 600; padding: 4px 9px; border-radius: 5px;
+    border: 1px solid #e5e7eb; background: #f9fafb; color: #374151;
+    cursor: pointer; transition: all 0.12s; white-space: nowrap;
+  }
+  .filter-btn:hover { border-color: #9ca3af; background: #f3f4f6; }
+  .filter-btn.active { background: #1f2937; color: #fff; border-color: #1f2937; }
+  .quick-btn.active { background: #1f2937; color: #a6d96a; border-color: #1f2937; }
+
+  .clear-btn {
+    font-size: 11px; font-weight: 600; padding: 4px 9px; border-radius: 5px;
+    border: 1px solid #fca5a5; background: #fef2f2; color: #dc2626;
+    cursor: pointer; transition: background 0.12s; white-space: nowrap;
+  }
+  .clear-btn:hover { background: #fee2e2; }
+
+  .filter-count {
+    font-size: 11px; color: #6b7280; white-space: nowrap;
+  }
+
+  .action-btn {
+    font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 5px;
+    border: 1px solid #d1d5db; background: #fff; color: #374151;
+    cursor: pointer; transition: background 0.12s; white-space: nowrap;
+  }
+  .action-btn:hover { background: #f3f4f6; }
+
   /* ── Cluster folder ──────────────────────────────────────────────────────── */
   .cluster-list { display: flex; flex-direction: column; gap: 10px; }
 
@@ -890,5 +1034,7 @@
     .report-row { grid-template-columns: 60px 1fr 80px; grid-template-rows: auto auto; }
     .col-target { display: none; }
     .col-notes  { grid-column: 1 / -1; }
+    .filter-bar { gap: 6px; }
+    .search-input { width: 120px; }
   }
 </style>

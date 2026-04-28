@@ -14,8 +14,10 @@ For each boulder in the area:
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,6 +36,22 @@ from ..services.dryness_model import (
 from ..services.bayesian import get_or_create_param, BOULDER_MULTIPLIER_PRIOR_VAR, AREA_OFFSET_PRIOR_VAR
 from ..config import get_settings
 
+_AREA_DRYING_CONFIG = Path(__file__).parent.parent.parent / "data" / "area_drying_config.json"
+
+
+def _load_area_drying_config() -> tuple[set[int], float]:
+    """
+    Load quick-drying area IDs and rate multiplier from config.
+    Returns (quick_drying_ids, multiplier). Falls back to empty set / 1.0 on error.
+    """
+    try:
+        data = json.loads(_AREA_DRYING_CONFIG.read_text())
+        ids = set(data.get("quick_drying_area_ids", []))
+        multiplier = float(data.get("quick_drying_rate_multiplier", 1.0))
+        return ids, multiplier
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+        return set(), 1.0
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,6 +59,8 @@ async def recompute_all_dryness_scores(db: AsyncSession) -> None:
     settings = get_settings()
     now = datetime.now(timezone.utc)
     history_cutoff = now - timedelta(days=settings.weather_history_days)
+
+    quick_drying_ids, quick_drying_multiplier = _load_area_drying_config()
 
     areas_result = await db.execute(select(Area))
     areas = areas_result.scalars().all()
@@ -74,11 +94,12 @@ async def recompute_all_dryness_scores(db: AsyncSession) -> None:
         area_var_ratio = area_offset_param.posterior_variance / AREA_OFFSET_PRIOR_VAR
         area_confidence = max(0.3, min(1.0, 1.0 - area_var_ratio * 0.7))
 
+        area_rate_multiplier = quick_drying_multiplier if area.id in quick_drying_ids else 1.0
         area_chars = AreaCharacteristics(
             aspect=area.aspect,
             shade_factor=area.shade_factor or 0.5,
             canopy_factor=area.canopy_factor or 0.5,
-            drying_rate_multiplier=1.0,  # area uses raw physics; multiplier is per-boulder
+            drying_rate_multiplier=area_rate_multiplier,
             area_drying_offset=area_offset,
         )
 
@@ -116,7 +137,7 @@ async def recompute_all_dryness_scores(db: AsyncSession) -> None:
                 aspect=boulder.aspect or area.aspect,
                 shade_factor=(boulder.shade_factor if boulder.shade_factor is not None else area.shade_factor) or 0.5,
                 canopy_factor=(boulder.canopy_factor if boulder.canopy_factor is not None else area.canopy_factor) or 0.5,
-                drying_rate_multiplier=multiplier,
+                drying_rate_multiplier=multiplier * area_rate_multiplier,
                 area_drying_offset=area_offset,
             )
 

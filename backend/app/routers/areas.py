@@ -29,7 +29,6 @@ from ..config import get_settings
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/areas", tags=["areas"])
 
-
 def _session_hash(request: Request) -> str:
     """Create an anonymised session fingerprint — no PII stored."""
     raw = f"{request.client.host}:{request.headers.get('user-agent', '')}"

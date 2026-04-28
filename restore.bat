@@ -9,7 +9,7 @@ echo  ==============================
 echo.
 
 REM Read credentials from .env
-for /f "usebackq tokens=1,2 delims==" %%a in (".env") do (
+for /f "usebackq tokens=1,* delims==" %%a in (".env") do (
     if "%%a"=="DB_USER"     set DB_USER=%%b
     if "%%a"=="DB_PASSWORD" set DB_PASSWORD=%%b
     if "%%a"=="DB_NAME"     set DB_NAME=%%b
@@ -26,7 +26,7 @@ if errorlevel 1 (
 )
 
 REM Check db container is up
-docker compose ps db | findstr "running" >nul 2>&1
+docker compose ps db | findstr /i /c:"Up" /c:"running" >nul 2>&1
 if errorlevel 1 (
     echo  ERROR: Database container is not running. Run start.bat first.
     pause & exit /b 1
@@ -92,7 +92,7 @@ if /i not "%CONFIRM%"=="YES" (
 echo.
 echo  Restoring...
 
-docker compose exec -T -e PGPASSWORD=%DB_PASSWORD% db ^
+docker compose exec -T -e "PGPASSWORD=%DB_PASSWORD%" db ^
     pg_restore -U %DB_USER% -d %DB_NAME% --clean --if-exists --no-owner --no-privileges ^
     < "%BACKUP_FILE%"
 
